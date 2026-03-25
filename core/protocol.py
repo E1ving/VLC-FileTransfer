@@ -1,62 +1,54 @@
 class OpticalProtocol:
-    # --- 1. 物理显示与采集参数 ---
-    SCREEN_W = 1920 
-    SCREEN_H = 1080 
-    FPS = 15 
-
-    BLOCK_SIZE = 18 
-    ANCHOR_SIZE = 144 
-    DRAW_ANCHOR_SIZE = 120
-    
-    ANCHOR_COLOR = 255 
-    THRESHOLD = 127 
-
-    # 数据区 1008x1008
+    # --- 1. 物理显示参数 ---
     DATA_AREA_SIZE = 1008
-    OFFSET_X = (SCREEN_W - DATA_AREA_SIZE) // 2  # 456
-    OFFSET_Y = (SCREEN_H - DATA_AREA_SIZE) // 2  # 36
+    SCREEN_W = 1008
+    SCREEN_H = 1008
+    
+    BLOCK_SIZE = 12 
+    ANCHOR_RESERVE = 8  # 8x8 预留区 (包含白边隔离带)
 
-    COLS = DATA_AREA_SIZE // BLOCK_SIZE # 56
-    ROWS = DATA_AREA_SIZE // BLOCK_SIZE # 56
-    TOTAL_BLOCKS = COLS * ROWS          # 3136 格
+    # 1008 / 12 = 84
+    COLS = 84
+    ROWS = 84
 
-    # --- 2. 帧结构定义 (保险逻辑核心) ---
-    # 定义帧头各字段占用的比特数 (1 bit = 1 block)
-    SYNC_BITS = 16    # 同步码：用于定位帧起始，过滤环境杂色
-    SEQ_BITS = 8      # 帧序号：解决重复帧与丢帧 (0-255 循环)
-    LEN_BITS = 16     # 载荷长度：标识本帧实际有效比特数
-    CRC_BITS = 16     # CRC 校验：确保整帧数据无误
-
-    # 同步码常量 (选一个抗噪强的比特序列，如 0xAAAA 或 0b1010...)
+    # --- 2. 帧结构定义 (单位: Bits) ---
+    SYNC_BITS = 16    
+    SEQ_BITS = 8      
+    LEN_BITS = 16     
+    CRC_BITS = 16     
+    
+    # 同步码模式
     SYNC_PATTERN = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0]
 
-    # --- 3. 辅助计算方法 ---
-    @staticmethod
-    def get_data_capacity_per_frame():
-        """
-        计算每帧真正能放多少 bits 的原始数据：
-        总格数(3136) 
-        - 锚点占位(8*8*4 = 256) 
-        - 帧头(16+8+16 = 40) 
-        - 帧尾校验(16)
-        = 2824 bits (约 353 字节)
-        """
-        anchor_blocks = (OpticalProtocol.ANCHOR_SIZE // OpticalProtocol.BLOCK_SIZE) ** 2 * 4
-        header_blocks = OpticalProtocol.SYNC_BITS + OpticalProtocol.SEQ_BITS + OpticalProtocol.LEN_BITS
-        trailer_blocks = OpticalProtocol.CRC_BITS
-        return OpticalProtocol.TOTAL_BLOCKS - anchor_blocks - header_blocks - trailer_blocks
+    # 视觉处理阈值
+    THRESHOLD = 128
 
-    @staticmethod
-    def is_in_anchor_zone(row, col):
-        num_blocks = OpticalProtocol.ANCHOR_SIZE // OpticalProtocol.BLOCK_SIZE
-        # 四个角返回 True
-        if (row < num_blocks or row >= OpticalProtocol.ROWS - num_blocks) and \
-           (col < num_blocks or col >= OpticalProtocol.COLS - num_blocks):
-            return True
-        return False
+    @classmethod
+    def get_header_bits_count(cls):
+        """同步码 + 序列号 + 长度字段"""
+        return cls.SYNC_BITS + cls.SEQ_BITS + cls.LEN_BITS
 
-    @staticmethod
-    def get_block_rect(row, col):
-        x1 = OpticalProtocol.OFFSET_X + col * OpticalProtocol.BLOCK_SIZE
-        y1 = OpticalProtocol.OFFSET_Y + row * OpticalProtocol.BLOCK_SIZE
-        return x1, y1, x1 + OpticalProtocol.BLOCK_SIZE, y1 + OpticalProtocol.BLOCK_SIZE
+    @classmethod
+    def get_data_capacity_per_frame(cls):
+        """
+        计算每一帧能够承载的【纯数据】比特数
+        计算公式：总格子数 - 4个锚点区 - 协议头 - CRC校验位
+        """
+        total_cells = cls.ROWS * cls.COLS  # 7056
+        anchor_cells = (cls.ANCHOR_RESERVE ** 2) * 4  # 256
+        
+        # 这里的 overhead 必须包含所有非数据位
+        overhead = cls.SYNC_BITS + cls.SEQ_BITS + cls.LEN_BITS + cls.CRC_BITS # 56
+        
+        return total_cells - anchor_cells - overhead # 7056 - 256 - 56 = 6744 bits
+
+    @classmethod
+    def is_in_anchor_zone(cls, r, c):
+        """判断坐标 (r, c) 是否属于四个角落的 8x8 预留区"""
+        res = cls.ANCHOR_RESERVE
+        is_top = r < res
+        is_bottom = r >= (cls.ROWS - res)
+        is_left = c < res
+        is_right = c >= (cls.COLS - res)
+        
+        return (is_top or is_bottom) and (is_left or is_right)
