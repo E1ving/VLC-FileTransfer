@@ -1,0 +1,1 @@
+Hello, this is a test file for VLC File Transfer. This file contains test data to verify the encoding and decoding process. The data should be encoded into frames and then decoded back to original form. Let's see if the last frame is properly generated and included in the video.
