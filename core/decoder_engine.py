@@ -67,6 +67,7 @@ class DecoderEngine:
         """
         适配全局 CRC 逻辑：校验对象为 [Header + Payload]
         """
+        received_seq = -1
         all_bits = self.frame_to_bits(img)
         
         # 基础长度检查 (SYNC 16 + SEQ 8 + LEN 16 + CRC 16 = 56)
@@ -108,7 +109,7 @@ class DecoderEngine:
         calculated_crc = binascii.crc32(self._bits_to_bytes(combined_for_crc)) & 0xFFFF
         
         if calculated_crc != received_crc_val:
-            print(f"❌ CRC 校验失败 | Seq: {received_seq} (收:{received_crc_val:04X} 算:{calculated_crc:04X})")
+            
             return False, None, received_seq
         
         # 4. 序号去重
