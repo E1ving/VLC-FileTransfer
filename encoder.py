@@ -2,6 +2,7 @@ import sys
 import os
 import shutil
 import math
+import numpy as np
 from core.encoder_engine import EncoderEngine
 from utils.video_muxer import VideoMuxer
 
@@ -19,74 +20,57 @@ def main():
         print("❌ 错误：max_ms 必须是整数（毫秒）")
         sys.exit(1)
 
-    # 2. 初始化引擎与容量配置
+    # 2. 初始化引擎
     fps = 15  
     encoder = EncoderEngine()
-    
-    # 【动态获取容量】不再硬编码 358 bytes
-    # 根据你的 1008x1008 协议计算出的每帧纯数据位宽
     bits_per_frame = encoder.p.get_data_capacity_per_frame()
     bytes_per_frame = bits_per_frame // 8
     
-    # 计算当前时长限制下的最大允许帧数
+    # 3. 计算物理窗口限制
     max_frames_allowed = math.floor((max_ms / 1000.0) * fps)
-    
-    # 3. 准备工作环境
+    file_size = os.path.getsize(input_path)
+    total_frames_needed = math.ceil(file_size / bytes_per_frame)
+
+    # 最终决定的生成帧数：严格受限于 max_ms
+    total_frames = min(total_frames_needed, max_frames_allowed)
+
+    print(f"📖 读取文件: {input_path} ({file_size} Bytes)")
+    print(f"⏱️  时长限制: {max_ms}ms | 最大允许帧数: {max_frames_allowed}")
+    print(f"📦 实际将生成: {total_frames} 帧 (约 {total_frames/fps:.2f} 秒)")
+
+    # 4. 准备工作环境
     temp_dir = "temp_encode_frames"
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
     os.makedirs(temp_dir)
 
-    # 4. 读取数据并计算分片
-    if not os.path.exists(input_path):
-        print(f"❌ 错误：找不到输入文件 {input_path}")
-        sys.exit(1)
-        
-    print(f"📖 读取文件: {input_path} ({os.path.getsize(input_path)} Bytes)")
+    # 5. 流式读取并渲染 (只读到 total_frames 为止)
     with open(input_path, "rb") as f:
-        full_data = f.read()
+        for frame_idx in range(total_frames):
+            chunk = f.read(bytes_per_frame)
+            if not chunk:
+                break
+            
+            # 高效转换比特 (MSB First)
+            frame_bits = np.unpackbits(np.frombuffer(chunk, dtype=np.uint8))
+            frame_bits_list = frame_bits.tolist()
 
-    # 计算总共需要的帧数
-    total_frames_needed = math.ceil(len(full_data) / bytes_per_frame)
-    
-    # 【时长检查与截断逻辑】
-    if total_frames_needed > max_frames_allowed:
-        print(f"⚠️ 警告：数据量庞大，共需 {total_frames_needed} 帧")
-        print(f"⏱️  时长限制 {max_ms}ms ({max_frames_allowed} 帧)，数据将被截断。")
-        total_frames = max_frames_allowed
-    else:
-        total_frames = total_frames_needed
-        print(f"✅ 数据适合时长限制: 预计占用 {total_frames} 帧 ({total_frames/fps:.2f} 秒)")
+            # 渲染并保存
+            save_path = os.path.join(temp_dir, f"frame_{frame_idx:05d}.png")
+            encoder.generate_single_frame(frame_bits_list, frame_idx % 256, save_path)
+            
+            if frame_idx % 20 == 0:
+                print(f" 进度: {frame_idx}/{total_frames} 帧渲染完成...", end='\r')
 
-    # 5. 提取需要编码的数据并转为比特流
-    # 截取数据以适应帧数限制
-    data_to_encode = full_data[:total_frames * bytes_per_frame]
-    
-    print(f"🔄 正在转换为比特流并渲染图像序列...")
-    
-    # 高效转换为比特列表
-    all_bits = []
-    for byte in data_to_encode:
-        # 确保使用 8位对齐，大端序 (MSB first)
-        all_bits.extend([int(b) for b in f"{byte:08b}"])
-        
-    # 6. 调用引擎生成图像
-    # generate_all_frames 内部会处理：
-    # [每帧切片] -> [添加 Header(SYNC/SEQ/LEN)] -> [计算 CRC] -> [绘制 1008x1008 矩阵]
-    encoder.generate_all_frames(all_bits, output_dir=temp_dir)
-
-    # 7. 调用 FFmpeg 进行无损合成 (CRF 0)
-    # 必须无损，否则 12px 的格子边缘会因为压缩产生虚影导致解码失败
-    print(f"🎬 调用 VideoMuxer (FFmpeg CRF 0) 合成视频...")
+    # 6. 合成视频
+    print(f"\n🎬 调用 VideoMuxer 合成无损视频...")
     VideoMuxer.ffmpeg_convert(temp_dir, output_path, fps=fps)
 
-    # 8. 清理并退出
+    # 7. 清理
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
         
-    print(f"✨ 编码任务圆满完成！")
-    print(f"📊 报告: 原始大小 {len(full_data)}B | 实际打包 {len(data_to_encode)}B | 总帧数 {total_frames}")
-    print(f"📂 视频已保存至: {output_path}")
+    print(f"✨ 编码任务圆满完成！已截断多余数据。")
 
 if __name__ == "__main__":
     main()
