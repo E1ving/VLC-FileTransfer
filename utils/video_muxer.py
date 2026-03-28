@@ -53,7 +53,7 @@ class VideoMuxer:
             ret, frame = cap.read()
             if not ret:
                 break
-            cv2.imwrite(os.path.join(output_dir, f"frame_{frame_idx:04d}.png"), frame)
+            cv2.imwrite(os.path.join(output_dir, f"frame_{frame_idx:05d}.png"), frame)
             frame_idx += 1
             
         cap.release()
@@ -67,7 +67,7 @@ class VideoMuxer:
         """
         cmd = [
             'ffmpeg', '-y', '-framerate', str(fps), 
-            '-i', os.path.join(frame_dir, 'frame_%04d.png'),
+            '-i', os.path.join(frame_dir, 'frame_%05d.png'),
             '-c:v', 'libx264', '-crf', '0',  # CRF 0 为无损编码
             output_path
         ]
