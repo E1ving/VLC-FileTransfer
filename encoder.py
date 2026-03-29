@@ -1,94 +1,76 @@
-import cv2
-import numpy as np
+import sys
 import os
-import binascii
-from core.protocol import OpticalProtocol as P
+import shutil
+import math
+import numpy as np
+from core.encoder_engine import EncoderEngine
+from utils.video_muxer import VideoMuxer
 
-class EncoderEngine:
-    def __init__(self):
-        self.p = P()
+def main():
+    # 1. 参数校验
+    if len(sys.argv) < 4:
+        print("💡 Usage: python encoder.py <in.bin> <out.mp4> <max_ms>")
+        sys.exit(1)
 
-    def create_base_frame(self):
-        """升级版：绘制双环嵌套锚点"""
-        img = np.zeros((self.p.SCREEN_H, self.p.SCREEN_W), dtype=np.uint8)
-        
-        # 锚点定义
-        anchor_size = self.p.ANCHOR_SIZE
-        border_width = 8 # 边框粗细
-        
-        anchors = [
-            (self.p.OFFSET_X, self.p.OFFSET_Y), 
-            (self.p.OFFSET_X + 1008 - anchor_size, self.p.OFFSET_Y),
-            (self.p.OFFSET_X + 1008 - anchor_size, self.p.OFFSET_Y + 1008 - anchor_size),
-            (self.p.OFFSET_X, self.p.OFFSET_Y + 1008 - anchor_size)
-        ]
-        
-        for i, (x, y) in enumerate(anchors):
-            # 1. 绘制底色白块
-            cv2.rectangle(img, (x, y), (x + anchor_size, y + anchor_size), 255, -1)
-            # 2. 绘制黑色边框（在内部，增加对比度）
-            hole_size = 60 if i != 2 else 30 # 中心孔大小
-            cv2.rectangle(img, (x + border_width, y + border_width), 
-                          (x + anchor_size - border_width, y + anchor_size - border_width), 0, border_width)
-            # 3. 绘制中心孔（挖空，提供识别特征点）
-            hole_off = (anchor_size - hole_size) // 2
-            cv2.rectangle(img, (x + hole_off, y + hole_off), 
-                          (x + hole_off + hole_size, y + hole_off + hole_size), 0, -1)
-            
-        return img
+    input_path = sys.argv[1]
+    output_path = sys.argv[2]
+    try:
+        max_ms = int(sys.argv[3])
+    except ValueError:
+        print("❌ 错误：max_ms 必须是整数（毫秒）")
+        sys.exit(1)
 
-    def _bits_to_bytes(self, bits):
-        """工具函数：比特流转字节，计算校验用"""
-        byte_arr = bytearray()
-        for i in range(0, len(bits), 8):
-            byte = 0
-            for bit in bits[i:i+8]:
-                byte = (byte << 1) | bit
-            byte_arr.append(byte)
-        return bytes(byte_arr)
+    # 2. 初始化引擎
+    fps = 25  
+    encoder = EncoderEngine()
+    bits_per_frame = encoder.p.get_data_capacity_per_frame()
+    bytes_per_frame = bits_per_frame // 8
+    
+    # 3. 计算物理窗口限制
+    max_frames_allowed = math.floor((max_ms / 1000.0) * fps)
+    file_size = os.path.getsize(input_path)
+    total_frames_needed = math.ceil(file_size / bytes_per_frame)
 
-    def draw_data(self, img, data_with_crc):
-        """绘制数据到图片上，跳过定位块区域"""
-        bit_idx = 0
-        for r in range(self.p.ROWS):
-            for c in range(self.p.COLS):
-                if self.p.is_in_anchor_zone(r, c):
-                    continue
-                
-                if bit_idx < len(data_with_crc):
-                    x1, y1, x2, y2 = self.p.get_block_rect(r, c)
-                    img[y1:y2, x1:x2] = 255 if data_with_crc[bit_idx] == 1 else 0
-                    bit_idx += 1
-        return img
+    # 最终决定的生成帧数：严格受限于 max_ms
+    total_frames = min(total_frames_needed, max_frames_allowed)
 
-    def generate_all_frames(self, all_bits, output_dir="data/frames"):
-        """将总比特流切片并生成序列图"""
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-            
-        capacity = self.p.get_data_capacity_per_frame()
-        
-        frame_count = 0
-        # 按单帧容量切片
-        for i in range(0, len(all_bits), capacity):
-            chunk = all_bits[i : i + capacity]
-            # 补齐最后一帧
-            if len(chunk) < capacity:
+    print(f"📖 读取文件: {input_path} ({file_size} Bytes)")
+    print(f"⏱️  时长限制: {max_ms}ms | 最大允许帧数: {max_frames_allowed}")
+    print(f"📦 实际将生成: {total_frames} 帧 (约 {total_frames/fps:.2f} 秒)")
+
+    # 4. 准备工作环境
+    temp_dir = "temp_encode_frames"
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir)
+
+    # 5. 流式读取并渲染 (只读到 total_frames 为止)
+    with open(input_path, "rb") as f:
+        for frame_idx in range(total_frames):
+            chunk = f.read(bytes_per_frame)
+            if not chunk:
                 break
             
-            # 计算 CRC (针对这 2864 位)
-            chunk_bytes = self._bits_to_bytes(chunk)
-            crc_val = binascii.crc32(chunk_bytes) & 0xFFFF
-            crc_bits = [int(b) for b in format(crc_val, '016b')]
-            
-            # 组合成待绘制的完整序列 (2864 + 16 = 2880 bits)
-            data_to_draw = chunk + crc_bits
+            # 高效转换比特 (MSB First)
+            frame_bits = np.unpackbits(np.frombuffer(chunk, dtype=np.uint8))
+            frame_bits_list = frame_bits.tolist()
 
-            # 生成并保存
-            base_img = self.create_base_frame()
-            final_frame = self.draw_data(base_img, data_to_draw)
+            # 渲染并保存
+            save_path = os.path.join(temp_dir, f"frame_{frame_idx:05d}.png")
+            encoder.generate_single_frame(frame_bits_list, frame_idx % 256, save_path)
             
-            cv2.imwrite(f"{output_dir}/frame_{frame_count:04d}.png", final_frame)
-            frame_count += 1
-            
-        print(f"✅ 已生成 {frame_count} 帧图片至 {output_dir}")
+            if frame_idx % 20 == 0:
+                print(f" 进度: {frame_idx}/{total_frames} 帧渲染完成...", end='\r')
+
+    # 6. 合成视频
+    print(f"\n🎬 调用 VideoMuxer 合成无损视频...")
+    VideoMuxer.ffmpeg_convert(temp_dir, output_path, fps=fps)
+
+    # 7. 清理
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+        
+    print(f"✨ 编码任务圆满完成！已截断多余数据。")
+
+if __name__ == "__main__":
+    main()

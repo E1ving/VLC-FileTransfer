@@ -1,98 +1,176 @@
-import argparse
+import sys
+import cv2
 import os
-
+import shutil
+import math
+import numpy as np
 from core.decoder_engine import DecoderEngine
+from utils.VisionCorrector import VisionCorrector
+from utils.video_muxer import VideoMuxer
 
+def main():
+    if len(sys.argv) < 4:
+        print("💡 Usage: python decode.py <recorded.mp4> <out.bin> <vout.bin> [max_ms]")
+        sys.exit(1)
+    video_path = sys.argv[1]
+    out_bin_path = sys.argv[2]
+    vout_bin_path = sys.argv[3]
 
-# 选择一个安全的拆帧输出目录：若目标目录已包含 png，则自动使用带后缀的新目录，避免混入旧帧
-def _choose_output_frames_dir(frames_dir: str) -> str:
-    base = frames_dir
-    candidate = base
-    suffix = 0
-    while True:
-        if not os.path.exists(candidate):
-            os.makedirs(candidate)
-            return candidate
+    # ------------ 请修改为该次测试使用的.bin文件 -----------------
+    gt_bin_path = "out.bin" # 非常重要！！！----------------------
+    # ---------------------------------------------------------
 
-        if not os.path.isdir(candidate):
-            raise RuntimeError(f"frames_dir is not a directory: {candidate}")
+    # 获取发送端的物理参数，用于对齐评估窗口
+    # 默认值 1000ms, 25fps 是为了兼容旧实验，建议运行时传入
+    max_ms = int(sys.argv[4]) if len(sys.argv) > 4 else 1000
+    tx_fps = 25 
 
-        has_png = any(name.lower().endswith(".png") for name in os.listdir(candidate))
-        if not has_png:
-            return candidate
+    # 1. 环境初始化
+    temp_dir = "temp_decode_frames"
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir)
 
-        suffix += 1
-        candidate = f"{base}_{suffix}"
+    corrector = VisionCorrector() 
+    decoder = DecoderEngine()
+    std_capacity = decoder.p.get_data_capacity_per_frame()
+    bytes_per_frame = std_capacity // 8
+    
+    # 2. 视频拆帧
+    print(f"🎞️ 正在拆解视频: {video_path}...")
+    VideoMuxer.video_to_frames(video_path, temp_dir)
+    
+    frame_files = sorted([f for f in os.listdir(temp_dir) if f.endswith(".png")], 
+                         key=lambda x: int(x.split('_')[1].split('.')[0]) if '_' in x else x)
+    
+    # --- 序号对齐变量 ---
+    decoded_packets = {}  # {abs_seq: bits}
+    last_raw_seq = -1
+    epoch = 0
+    finalized_seqs = set()
+    
+    # 3. 逐帧处理
+    success_frame_count = 0
+    total_processed = 0
 
+    print(f"🔍 开始解码 {len(frame_files)} 个候选帧 (冗余采样模式)...")
+    
+    for frame_name in frame_files:
+        total_processed += 1
+        img = cv2.imread(os.path.join(temp_dir, frame_name))
+        if img is None: continue
+        
+        warped = corrector.correct(img)
+        if warped is None or (isinstance(warped, str) and warped == "SKIP"):
+            continue 
+        
+        is_valid, data_payload, raw_seq = decoder.process_frame(warped)
+        
+        if raw_seq != -1:
+            if last_raw_seq != -1 and raw_seq < last_raw_seq - 100:
+                epoch += 1
+            current_abs_seq = epoch * 256 + raw_seq
+            last_raw_seq = raw_seq
+        else:
+            continue
 
-# 将 vout.bin（每 bit 用 1 个字节 0/1 表示）按 8 bit 打包回真实字节流，生成 out.bin
-def _pack_vout_bits_to_bytes(vout_path: str, out_path: str) -> int:
-    out_dir = os.path.dirname(out_path)
-    if out_dir and not os.path.exists(out_dir):
-        os.makedirs(out_dir)
+        if current_abs_seq in finalized_seqs:
+            continue
 
-    bytes_written = 0
-    cur = 0
-    cur_bits = 0
-    with open(vout_path, "rb") as fin, open(out_path, "wb") as fout:
-        while True:
-            chunk = fin.read(8192)
-            if not chunk:
-                break
-            for b in chunk:
-                bit = 1 if b else 0
-                cur = (cur << 1) | bit
-                cur_bits += 1
-                if cur_bits == 8:
-                    fout.write(bytes([cur]))
-                    bytes_written += 1
-                    cur = 0
-                    cur_bits = 0
-    return bytes_written
+        if is_valid is True:
+            decoded_packets[current_abs_seq] = data_payload
+            finalized_seqs.add(current_abs_seq)
+            success_frame_count += 1
 
+    # 4. 基于序号重组比特流与生成掩码
+    print(f"💾 正在根据序号重组并自动补全...")
+    all_recovered_bits = []
+    all_mask_bits = [] 
+    
+    if decoded_packets:
+        # 优化：从 Seq 0 开始重组，确保与文件起始位置对齐
+        # 如果你确定视频是从第一帧拍的，min_seq 设为 0
+        min_seq = 0 
+        max_seq = max(decoded_packets.keys())
 
-# 解码入口：视频拆帧 -> 图片解调+CRC -> 输出 vout.bin -> 可选输出 out.bin
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("video_path")
-    parser.add_argument("out_path", nargs="?", default=None)
-    parser.add_argument("vout_path", nargs="?", default=None)
-    parser.add_argument("--frames-dir", default="temp_extracted")
-    parser.add_argument("--fps-limit", type=float, default=None)
-    parser.add_argument("--out", default=os.path.join("data", "out.bin"))
-    parser.add_argument("--vout", default=os.path.join("data", "vout.bin"))
-    parser.add_argument("--no-out", action="store_true")
-    parser.add_argument("--skip-extract", action="store_true")
-    parser.add_argument("--keep-bad-crc", action="store_true")
-    args = parser.parse_args()
+        for s in range(min_seq, max_seq + 1):
+            if s in decoded_packets:
+                all_recovered_bits.extend(decoded_packets[s])
+                all_mask_bits.extend([1] * len(decoded_packets[s]))
+            else:
+                all_recovered_bits.extend([0] * std_capacity)
+                all_mask_bits.extend([0] * std_capacity)
 
-    dec = DecoderEngine()
+    # 5. 写入文件
+    out_bytes = bytearray()
+    for i in range(0, len(all_recovered_bits), 8):
+        chunk = all_recovered_bits[i:i+8]
+        if len(chunk) < 8: break
+        byte_val = 0
+        for bit in chunk: byte_val = (byte_val << 1) | bit
+        out_bytes.append(byte_val)
 
-    out_path = args.out_path or args.out
-    vout_path = args.vout_path or args.vout
+    with open(out_bin_path, "wb") as f: f.write(out_bytes)
+    
+    vout_bytes = bytearray()
+    for i in range(0, len(all_mask_bits), 8):
+        m_chunk = all_mask_bits[i:i+8]
+        if len(m_chunk) < 8: break
+        vout_bytes.append(0xFF if all(m_chunk) else 0x00)
+    with open(vout_bin_path, "wb") as f: f.write(vout_bytes)
 
-    if not args.skip_extract:
-        # 1) 视频 -> 图片序列（OpenCV VideoCapture）
-        frames_dir = _choose_output_frames_dir(args.frames_dir)
-        extracted = dec.video_to_frames(args.video_path, frames_dir, fps_limit=args.fps_limit)
-        print(f"✅ 已提取 {extracted} 帧至 {frames_dir}")
-    else:
-        # 直接使用已有图片目录（不重新拆帧）
-        frames_dir = args.frames_dir
+    # 6. 获取时长
+    cap = cv2.VideoCapture(video_path)
+    cap_fps = cap.get(cv2.CAP_PROP_FPS)
+    f_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    duration = f_count / cap_fps if (cap_fps > 0 and f_count > 0) else 8.0
+    cap.release()
 
-    # 2) 图片序列 -> vout.bin（每个 bit 保存为一个字节 0/1；可按 CRC 过滤坏帧）
-    bits_written = dec.frames_to_vout(
-        frames_dir,
-        output_path=vout_path,
-        require_crc_pass=not args.keep_bad_crc,
-    )
-    print(f"✅ 已写入 vout: {vout_path} ({bits_written} bytes)")
+    # 7. --- 修改后的核心评估逻辑 ---
+    print(f"\n" + "="*40)
+    print(f"✨ 解码任务圆满完成！")
+    
+    if gt_bin_path and os.path.exists(gt_bin_path):
+        # 核心：计算发送端当时实际生成的最大载荷字节数
+        max_frames_allowed = math.floor((max_ms / 1000.0) * tx_fps)
+        max_sent_bytes = max_frames_allowed * bytes_per_frame
+        
+        with open(gt_bin_path, 'rb') as f:
+            # 只读取物理窗口允许的数据量
+            gt_raw_data = f.read(max_sent_bytes)
+        
+        gt_bits = np.unpackbits(np.frombuffer(gt_raw_data, dtype=np.uint8))
+        
+        # 物理窗口对齐：评估长度必须是真值比特和恢复比特的交集
+        eval_len = min(len(gt_bits), len(all_recovered_bits))
+        
+        rec_bits_arr = np.array(all_recovered_bits[:eval_len])
+        gt_bits_arr = np.array(gt_bits[:eval_len])
+        mask_bits_arr = np.array(all_mask_bits[:eval_len])
 
-    if not args.no_out:
-        # 3) vout.bin -> out.bin（将 bit 流打包为真实字节流）
-        out_bytes = _pack_vout_bits_to_bytes(vout_path, out_path)
-        print(f"✅ 已写入 out: {out_path} ({out_bytes} bytes)")
+        # 误码统计
+        erasure_rate = np.sum(mask_bits_arr == 0) / eval_len
+        undetected_errors = (rec_bits_arr != gt_bits_arr) & (mask_bits_arr == 1)
+        ber = np.sum(undetected_errors) / eval_len
 
+        # 有效传输量计算
+        error_indices = np.where(undetected_errors == True)[0]
+        effective_bits = error_indices[0] if len(error_indices) > 0 else np.sum(mask_bits_arr)
+        bps = effective_bits / duration
+
+        print(f"📊 窗口评估报告 (对齐 Max_MS: {max_ms}ms):")
+        print(f"   - 有效传输量: {int(effective_bits)} bits")
+        print(f"   - 有效传输率: {bps / 1000:.2f} kbps")
+        print(f"   - 误码率 (BER): {ber:.6%}")
+        print(f"   - 丢失率 (Erasure): {erasure_rate:.2%}")
+    
+    print(f"📊 基础统计:")
+    print(f"   - 独立有效帧: {success_frame_count}")
+    print(f"   - 最终产出:   {len(out_bytes)} Bytes")
+    print(f"   - 视频时长:   {duration:.2f} s")
+    print("="*40)
+
+    if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
 if __name__ == "__main__":
     main()
