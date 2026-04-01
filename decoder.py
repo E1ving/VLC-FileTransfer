@@ -16,12 +16,7 @@ def main():
     out_bin_path = sys.argv[2]
     vout_bin_path = sys.argv[3]
 
-    # ------------ 请修改为该次测试使用的.bin文件 -----------------
-    gt_bin_path = "out.bin" # 非常重要！！！----------------------
-    # ---------------------------------------------------------
-
-    # 获取发送端的物理参数，用于对齐评估窗口
-    # 默认值 1000ms, 25fps 是为了兼容旧实验，建议运行时传入
+    # 获取发送端的物理参数
     max_ms = int(sys.argv[4]) if len(sys.argv) > 4 else 1000
     tx_fps = 25 
 
@@ -88,8 +83,6 @@ def main():
     all_mask_bits = [] 
     
     if decoded_packets:
-        # 优化：从 Seq 0 开始重组，确保与文件起始位置对齐
-        # 如果你确定视频是从第一帧拍的，min_seq 设为 0
         min_seq = 0 
         max_seq = max(decoded_packets.keys())
 
@@ -126,44 +119,9 @@ def main():
     duration = f_count / cap_fps if (cap_fps > 0 and f_count > 0) else 8.0
     cap.release()
 
-    # 7. --- 修改后的核心评估逻辑 ---
+    # 7. 打印统计结果 (已去掉评估部分)
     print(f"\n" + "="*40)
     print(f"✨ 解码任务圆满完成！")
-    
-    if gt_bin_path and os.path.exists(gt_bin_path):
-        # 核心：计算发送端当时实际生成的最大载荷字节数
-        max_frames_allowed = math.floor((max_ms / 1000.0) * tx_fps)
-        max_sent_bytes = max_frames_allowed * bytes_per_frame
-        
-        with open(gt_bin_path, 'rb') as f:
-            # 只读取物理窗口允许的数据量
-            gt_raw_data = f.read(max_sent_bytes)
-        
-        gt_bits = np.unpackbits(np.frombuffer(gt_raw_data, dtype=np.uint8))
-        
-        # 物理窗口对齐：评估长度必须是真值比特和恢复比特的交集
-        eval_len = min(len(gt_bits), len(all_recovered_bits))
-        
-        rec_bits_arr = np.array(all_recovered_bits[:eval_len])
-        gt_bits_arr = np.array(gt_bits[:eval_len])
-        mask_bits_arr = np.array(all_mask_bits[:eval_len])
-
-        # 误码统计
-        erasure_rate = np.sum(mask_bits_arr == 0) / eval_len
-        undetected_errors = (rec_bits_arr != gt_bits_arr) & (mask_bits_arr == 1)
-        ber = np.sum(undetected_errors) / eval_len
-
-        # 有效传输量计算
-        error_indices = np.where(undetected_errors == True)[0]
-        effective_bits = error_indices[0] if len(error_indices) > 0 else np.sum(mask_bits_arr)
-        bps = effective_bits / duration
-
-        print(f"📊 窗口评估报告 (对齐 Max_MS: {max_ms}ms):")
-        print(f"   - 有效传输量: {int(effective_bits)} bits")
-        print(f"   - 有效传输率: {bps / 1000:.2f} kbps")
-        print(f"   - 误码率 (BER): {ber:.6%}")
-        print(f"   - 丢失率 (Erasure): {erasure_rate:.2%}")
-    
     print(f"📊 基础统计:")
     print(f"   - 独立有效帧: {success_frame_count}")
     print(f"   - 最终产出:   {len(out_bytes)} Bytes")
