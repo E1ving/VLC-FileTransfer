@@ -14,7 +14,7 @@ XMU Computer Networks Course Project – Group 19
 
 在标准室内光照环境下测得：
 
-- **有效传输速率 (Goodput):** \~127.49 kbps
+- **有效传输速率 (Goodput):**  ≈ 160 kbps
 - **误码率 (BER):** **0.000000%** (位级完全一致)
 - **丢失率 (Erasure Rate):** 0.00% (基于双倍采样冗余)
 - **同步机制:** 基于 8-bit 序号循环与 Epoch 自动回绕处理
@@ -56,7 +56,7 @@ XMU Computer Networks Course Project – Group 19
 ### 工具与脚本
 
 - **`encode.py`**: 发送端主程序。驱动显示器循环播放编码后的色块序列。
-- **`decode.py`**: **接收端主程序**。集成解帧、比特重组、空洞补全、文件输出及自动化 BER 评估。
+- **`decode.py`**: **接收端主程序**。集成解帧、比特重组、空洞补全、文件输出。
 - **`utils/VisionCorrector.py`**: 视觉预处理。负责屏幕定位与透视校正（Perspective Transform）。
 - **`utils/video_muxer.py`**: 视频处理工具。负责高效的视频/图像序列转换。
 
@@ -86,24 +86,6 @@ Bash
 
 ```
 python decode.py in.mp4 out.bin vout.bin
-```
-
-### 3. 报告解读
-
-运行结束后，控制台将输出如下报告：
-
-Plaintext
-
-```
-========================================
-✨ 解码任务圆满完成！
-📊 严格评估报告 (对标 in.bin):
-   - 有效传输量: 819200 bits
-   - 有效传输率: 127.49 kbps
-   - 误码率 (BER): 0.000000%
-   - 丢失率 (Erasure): 0.00%
-========================================
-
 ```
 
 ***
